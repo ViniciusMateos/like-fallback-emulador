@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.1.0] — 2026-11-17
+
+### Corrigido
+- fix: o IG é fechado e aberto no começo de cada conta e a cada 60 perfis abertos (Like Fallback e modo funil) — cada perfil aberto por link ficava empilhado no app (1.200+ sem reiniciar), o Android do MuMu travava (load 6,5) e as visitas dobravam de tempo e saíam zeradas
+- fix: depois dos stories, confere se voltou pro perfil da pessoa antes do destaque (perfil com 4 destaques saía sem nenhum); faixa de destaques na tela sem o item = espera carregar e, se a capa vier sem a descrição, toca o 1º destaque pela posição (em cima do nome dele)
+- fix: o fim do feed é reconhecido pela posição dos corações e cabeçalhos — o tamanho do dump mudava com vídeo tocando e a conta ficava ~14 s rolando à toa
+- fix: bloqueio de ação ("Tentar mais tarde — Limitamos a frequência…") ao abrir perfil para a conta na hora (antes dava "falha" a cada 14 s e seguia abrindo perfil com a conta bloqueada, segue23), sem descanso automático depois (quem decide quando a conta volta é o Vinicius); 5 perfis seguidos que não abrem param a conta; "falha" não vira visita (a pessoa continua na fila)
+- fix: post do chat não é colhido de novo — nem na mesma passada (legenda só de emoji escapava do registro da frota e voltava 3x) nem nos 14 dias seguintes
+- fix: foto zerada com o feed aberto diz o motivo no log (nenhum coração no feed, com a tela salva, ou fotos já curtidas)
+- fix: privada é reconferida no máximo 2 vezes (antes: todo dia por 7 dias) — medido em 2388 reconferências: 42 aceitaram na 1ª, 6 na 2ª e nenhuma depois; a segue19 abria ~280 perfis em 13 min só reconferindo e fazia 2 visitas
+- fix: modo funil — a janela "O teu pedido está pendente" depois de tocar Seguir conta como follow que não colou (fecha com OK; 4 seguidos param a conta) e, presa por cima do perfil seguinte, é fechada; antes ela ficava na frente de tudo e cada perfil dava "falha" a cada 13 s (segue31)
+- fix: modo funil — 5 perfis seguidos que não abrem param a conta; bloqueio de ação fecha a janela antes de parar
+- fix: `metricas.py` só conta quem foi tocado depois da 1ª leitura da base — antes, quem converteu antes dela saía da conta e quem não converteu ficava, e as contas antigas apareciam com 0% e o "só follow" com a taxa achatada
+
+### Modificado
+- update: `seguir_funil` é a 1ª parte de todo Auto Follow (não mais um modo à parte); o log diz "funil: N pessoa(s) pra @conta seguir primeiro"
+- update: log do app mais limpo — os tempos de cada etapa, a reabertura do IG, as telas salvas e cada reconferência de privada vão só pro log técnico (agente.log); o app vê um resumo por lote ("N privados reconferidos")
+
+### Documentação
+- docs: README com a reconferência limitada e o funil no Auto Follow
+
 ## [1.0.0] — 2026-11-13
 
 ### Adicionado
