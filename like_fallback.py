@@ -303,11 +303,22 @@ def _refazer(e):
             and not e.get("destaque") and not e.get("revisita"))
 
 
+# 15/11: medido no log — 2388 reconferências acharam 48 privadas que aceitaram: 42 na 1ª, 6 na 2ª e NENHUMA da
+# 3ª em diante. Reconferir todo dia por 7 dias reabria centenas de perfis por conta por dia (~20 min e peso no
+# limite de ações do IG) pra nada; agora são no máximo 2 reconferências por privada.
+RECONF_MAX = 2
+
+
 def _reconferir_privado(e, ts_follow, agora):
-    """Privada que a conta seguiu: reconfere ~1x por dia se aceitou o follow (13/11, funil), até 7 dias
-    depois do follow. Aceitou e não seguiu o brechó = a conta curte."""
-    return (isinstance(e, dict) and e.get("r") == "privado" and agora - float(e.get("ts") or 0) >= 20 * 3600
-            and agora - ts_follow <= 7 * 86400)
+    """Privada que a conta seguiu: reconfere se aceitou o follow (13/11, funil) — ~1x por dia, até RECONF_MAX
+    vezes e até 7 dias depois do follow. Aceitou e não seguiu o brechó = a conta curte. `n` = quantas vezes a
+    pessoa já foi vista privada (1 = a 1ª visita, sem reconferência ainda)."""
+    try:
+        vistas = int(e.get("n") or 1) if isinstance(e, dict) else 1
+    except (TypeError, ValueError):
+        vistas = 1
+    return (isinstance(e, dict) and e.get("r") == "privado" and vistas <= RECONF_MAX
+            and agora - float(e.get("ts") or 0) >= 20 * 3600 and agora - ts_follow <= 7 * 86400)
 
 
 def fila_de_like(conta, est, seguidos=None, min_horas=24, max_dias=0):
@@ -394,6 +405,13 @@ def _tocar(d, bb):
     d.click((bb[0] + bb[2]) // 2, (bb[1] + bb[3]) // 2)
 
 
+def _fechar_ok(d):
+    try:
+        d(text="OK").click_exists(timeout=1)
+    except Exception:
+        pass
+
+
 def abrir_perfil(d, user, log=None):
     """Perfil por link, SEM desistir de perfil sem posts (o scraper desiste). 'ok' | 'privado' |
     'indisponivel' | 'falha'."""
@@ -406,6 +424,16 @@ def abrir_perfil(d, user, log=None):
         _sleep(0.35, 0.45)
         xml = _dump(d)
         low = xml.lower()
+        # 14/11 (segue23): "Tentar mais tarde — Limitamos a frequência…" por cima do perfil — sem isto o bot
+        # dava "falha" a cada 14 s e seguia abrindo perfil com a conta bloqueada
+        if af._pedido_pendente(xml):
+            # 15/11 (segue31): a janela do "pedido pendente" de um follow anterior fica presa por cima de
+            # TODO perfil aberto depois (falha a cada 13 s até o IG reabrir) — fecha e segue
+            _fechar_ok(d)
+            continue
+        blk = af._bloqueio(xml)
+        if blk:
+            return f"bloqueio:{blk}"
         if any(k in low for k in INDISPONIVEL_TXT):
             return "indisponivel"
         titulo = re.search(r'resource-id="[^"]*:id/action_bar_title"[^>]*text="([^"]*)"', xml) or \
@@ -633,9 +661,12 @@ def curtir_fotos(d, conta, n, log=None, parar=None):
         d.press("back")
         return 0
     feitas, parado, prev, tocados = 0, 0, None, set()
+    viu_coracao, viu_livre = False, False
     for _ in range(n * 3 + 4):
         _chk(parar)
         cs = _coracoes(xml, H)
+        viu_coracao = viu_coracao or bool(cs)
+        viu_livre = viu_livre or any(not ok for _bb, ok in cs)
         livres = [bb for bb, ok in cs if not ok and bb not in tocados]
         if livres:
             # toca os corações livres da tela de uma vez e confere todos numa leitura só (antes: até
@@ -652,7 +683,13 @@ def curtir_fotos(d, conta, n, log=None, parar=None):
             if feitas >= n:
                 break
             continue
-        assin = tuple(bb for bb, _ok in cs) + (len(xml),)
+        # 13/11: a assinatura era o tamanho do dump — vídeo tocando / "há X min" mudam o texto, o fim do
+        # feed nunca era reconhecido e a conta ficava ~14 s rolando à toa. Agora: a POSIÇÃO dos corações e
+        # dos cabeçalhos dos posts (só muda se o feed andou)
+        assin = tuple(bb for bb, _ok in cs) + tuple(
+            m.group(1) for m in re.finditer(
+                r'resource-id="[^"]*:id/(?:row_feed_profile_header|row_feed_photo_profile_name)"[^>]*bounds="([^"]*)"',
+                xml))
         parado = parado + 1 if assin == prev else 0
         if parado >= 2:                              # o feed não anda mais = acabaram os posts
             break
@@ -661,8 +698,26 @@ def curtir_fotos(d, conta, n, log=None, parar=None):
         d.swipe(W // 2, int(H * 0.78), W // 2, int(H * 0.28), 0.2)
         _sleep(0.45, 0.5)
         xml = _dump(d)
+    if not feitas:                                   # feed aberto e nada curtido: diz o porquê (13/11)
+        if not viu_coracao:
+            _grade_motivo = "nenhum coração no feed" + _salvar_debug(d, "fotos0", xml)
+        elif not viu_livre:
+            _grade_motivo = "as fotos já estavam curtidas"
     d.press("back")                                  # feed → perfil (o próximo perfil abre por link)
     return feitas
+
+def _perfil_aberto(d, user):
+    """O perfil de `user` está aberto na frente (título = @ e o cabeçalho do perfil na tela)?"""
+    try:
+        xml = _dump(d)
+    except Exception:
+        return False
+    t = (re.search(r'resource-id="[^"]*:id/action_bar_title"[^>]*text="([^"]*)"', xml)
+         or re.search(r'text="([^"]*)"[^>]*resource-id="[^"]*:id/action_bar_title"', xml))
+    return bool(t and t.group(1).strip().lower() == user.lower()
+                and ":id/profile_header_following_stacked_familiar" in xml
+                and "expanded_profile_pic_container" not in xml)
+
 
 def _fechar_foto_ampliada(d):
     """Fecha a foto de perfil ampliada (expanded_profile_pic, com "Partilhar perfil"/"Código QR") se ela
@@ -693,7 +748,7 @@ def curtir_stories(d, user, maximo, log=None, parar=None):
         if d(resourceId=rid("reel_viewer_title")).wait(timeout=4):
             abriu = True
             break
-        # 12/11 (kirianny.rtl): o toque abriu a FOTO DE PERFIL ampliada em vez do story — ela fica por
+        # 12/11: o toque abriu a FOTO DE PERFIL ampliada em vez do story — ela fica por
         # cima e trava destaque e fotos. Fecha e tenta de novo uma vez.
         if not _fechar_foto_ampliada(d):
             break
@@ -764,14 +819,55 @@ def _desc(sel):
         return ""
 
 
+def _ponto_1o_destaque(xml):
+    """(x, y) pra tocar a capa do 1º destaque da faixa pela posição: o nome (":id/label") fica embaixo da
+    capa — toca no meio da capa, entre o topo da faixa e o nome. None se não achou a faixa/nome."""
+    faixa = None
+    for m in re.finditer(r"<node[^>]*/?>", xml):
+        t = m.group(0)
+        r = _attr(t, "resource-id")
+        if r.endswith((":id/highlights_reel_tray_recycler_view", ":id/highlights_tray")):
+            faixa = faixa or _bounds(t)
+    if not faixa:
+        return None
+    nomes = []
+    for m in re.finditer(r"<node[^>]*/?>", xml):
+        t = m.group(0)
+        bb = _bounds(t)
+        if (_attr(t, "resource-id").endswith(":id/label") and bb and faixa[0] <= bb[0] and bb[2] <= faixa[2]
+                and faixa[1] <= bb[1] and bb[3] <= faixa[3]):
+            nomes.append(bb)
+    if not nomes:
+        return None
+    n = min(nomes, key=lambda b: b[0])                # o 1º da esquerda
+    return (n[0] + n[2]) // 2, (faixa[1] + n[1]) // 2
+
+
 def abrir_destaque(d, maximo=3, log=None, parar=None):
     """Abre o 1º destaque e CURTE as telas dele (até `maximo`), passando uma por uma; volta pro perfil.
     Devolve quantas curtiu, ou None se não tinha destaque / não abriu."""
     alvo = d(descriptionContains="História em destaque de")
     try:
         if not alvo.exists:
-            return None
-        alvo.click()
+            xml = _dump(d)
+            if ":id/highlights_tray" not in xml and ":id/highlights_reel_tray" not in xml:
+                return None                          # perfil sem destaque
+            # 13/11 (perfil com 4 destaques saiu sem nenhum): a faixa de destaques está na tela mas o item não — espera ele carregar
+            if alvo.wait(timeout=2.5):
+                alvo.click()
+            else:
+                # 13/11 (kpone9d): o item está na faixa (com o nome embaixo) mas a capa veio SEM a descrição
+                # "História em destaque de…" — toca pela posição: no meio da capa, logo acima do nome
+                xml = _dump(d)
+                ponto = _ponto_1o_destaque(xml)
+                if not ponto:
+                    _tec(log, "  (destaque: a faixa está na tela mas não achei o destaque"
+                              + _salvar_debug(d, "destaque", xml) + ")")
+                    return None
+                _tec(log, "  (destaque sem descrição: toco o 1º da faixa pela posição)")
+                d.click(*ponto)
+        else:
+            alvo.click()
     except Exception:
         return None
     if not d(resourceId=rid("reel_viewer_title")).wait(timeout=5):
@@ -870,7 +966,8 @@ def conferir_lote(d, usuarios, log=None, parar=None):
     return out, st
 
 
-def colher_posts(d, log, nome_chat="vaitomanoquasenada", parar=None, teto=400, max_posts=3, min_nomes=150):
+def colher_posts(d, log, nome_chat="vaitomanoquasenada", parar=None, teto=400, max_posts=3, min_nomes=150,
+                 ja_colhidos=()):
     """FONTE FRIA (13/11, funil): abre os próximos posts pendentes do chat — a MESMA fronteira do Auto
     Follow (o post é consumido pela frota uma vez só: registro + ❤) —, lê os curtidores da folha
     "Gostos" rolando e marca cada post como feito. Colhe até `max_posts` posts ou `min_nomes` nomes por
@@ -883,7 +980,10 @@ def colher_posts(d, log, nome_chat="vaitomanoquasenada", parar=None, teto=400, m
     if af.ir_para_fronteira(d, log, reg=reg, parar_flag=parar) is None:
         _log(log, "  não achei a fronteira do chat")
         return colhidos
-    pulados = set()
+    # 14/11 (anneloiise_ colhido 3x seguidas): post de legenda fraca (só emoji/pontuação) não entra no
+    # registro da frota e o ❤ nem sempre gruda — sem isto ele volta a ser "pendente" na hora. `pulados`
+    # guarda o que já foi visto NESTA passada; `ja_colhidos` (do funil, 14 dias) o que outras passadas colheram
+    pulados = set(ja_colhidos or ())
     for _ in range(60):
         _chk(parar)
         af._assentar(d)
@@ -939,8 +1039,10 @@ def colher_posts(d, log, nome_chat="vaitomanoquasenada", parar=None, teto=400, m
             pulados.add(post["chave"])
             continue
         af._marcar_feito(reg, post["chave"])           # consumido pela frota (o Auto Follow pula)
+        pulados.add(post["chave"])
         try:
-            af.marcar_post(d, log, post["chave"])
+            ok_coracao = af.marcar_post(d, getattr(log, "tecnico", None) or log, post["chave"])
+            _tec(log, f"  reação no post de {post['autor']}: {'ok' if ok_coracao else 'não grudou'}")
         except Exception:
             pass
         colhidos.append((post["chave"], nomes))
@@ -960,6 +1062,24 @@ def _texto_botao_follow(xml):
 
 
 _JA_SEGUE_TXT = ("a seguir", "pedido enviado", "solicitado", "following", "requested")
+REABRIR_IG_CADA = 60      # perfis abertos por link até fechar e abrir o IG (memória do app, 13/11)
+
+
+def _tec(log, msg):
+    """Linha TÉCNICA: só no agente.log, não no log do app (13/11: "o log tem que ficar mais limpo")."""
+    f = getattr(log, "tecnico", None)
+    if f:
+        f(msg)
+    else:
+        _log(log, msg)
+
+
+def _limpar_ig(d, log, motivo):
+    """Fecha e abre o IG (a conta continua a mesma) — cada perfil aberto por link fica empilhado no app."""
+    try:
+        af.reabrir_ig(d, getattr(log, "tecnico", None) or log, motivo)
+    except Exception:
+        pass
 
 
 def seguir_funil(d, log, conta, limite=0, entre=(1.0, 2.0), parar=None, simular=False):
@@ -971,32 +1091,56 @@ def seguir_funil(d, log, conta, limite=0, entre=(1.0, 2.0), parar=None, simular=
     est = carregar()
     fu = fn.carregar()
     fila = fn.fila_follow(fu, conta, est["seguidores"])
-    _log(log, f"modo funil: {len(fila)} pessoa(s) pra @{conta} seguir (privadas que ela não pôde curtir + "
+    _log(log, f"funil: {len(fila)} pessoa(s) pra @{conta} seguir primeiro (privadas que ela não pôde curtir + "
               f"curtidas há 1+ dia que não seguiram o brechó)")
-    feitos, nao_colou = 0, 0
+    feitos, nao_colou, abertos, falhas_seg = 0, 0, 0, 0
 
     def _fim(ok, motivo):
         return {"ok": ok, "motivo": motivo, "follows": feitos, "posts": 0}
 
+    def _travou(blk):
+        """Bloqueio de ação na tela: fecha (OK) pra não ficar por cima da próxima conta e para."""
+        _fechar_ok(d)
+        _log(log, f"!! BLOQUEIO: {blk} — parando")
+        return _fim(False, f"bloqueio:{blk}")
+
+    if fila:
+        _limpar_ig(d, log, "começo da conta: IG com a memória limpa")
     for u in fila:
         if parar and parar():
             return _fim(True, "parado")
         if limite and feitos >= limite:
             return _fim(True, "limite")
+        abertos += 1
+        if abertos % REABRIR_IG_CADA == 0:
+            _limpar_ig(d, log, f"{abertos} perfis abertos: limpa a memória do IG")
         try:
             r = abrir_perfil(d, u, log)
         except Exception as e:
             r = f"erro:{str(e)[:60]}"
+        if r.startswith("bloqueio"):
+            return _travou(r.split(":", 1)[-1])
+        if r == "falha" or r.startswith("erro"):
+            # 15/11 (segue31): uma janela na frente faz TODO perfil "falhar" — 5 seguidas, para a conta
+            falhas_seg += 1
+            _tec(log, f"  - @{u}: {r}")
+            if falhas_seg >= 5:
+                _log(log, f"!! @{conta}: 5 perfis seguidos não abriram — paro esta conta")
+                return _fim(False, "falhas_seguidas")
+            continue
+        falhas_seg = 0
         if r not in ("ok", "privado"):
             fn.marcar(fu, u, conta, "descartado")
             fn.salvar(fu)
             _log(log, f"  - @{u}: {r}")
             continue
         xml = _dump(d)
+        if af._pedido_pendente(xml):                 # janela presa de um follow anterior: fecha
+            _fechar_ok(d)
+            xml = _dump(d)
         blk = af._bloqueio(xml)
         if blk:
-            _log(log, f"!! BLOQUEIO: {blk} — parando")
-            return _fim(False, f"bloqueio:{blk}")
+            return _travou(blk)
         txt, bb = _texto_botao_follow(xml)
         if txt in _JA_SEGUE_TXT:
             fn.marcar(fu, u, conta, "seguido")
@@ -1017,10 +1161,20 @@ def seguir_funil(d, log, conta, limite=0, entre=(1.0, 2.0), parar=None, simular=
             af._confirmar_revisao(d, xml2)
             _sleep(1.0, 1.5)
             xml2 = _dump(d)
+        pendente = af._pedido_pendente(xml2)
+        blk2 = af._bloqueio(xml2)
+        if blk2:
+            return _travou(blk2)
+        if pendente:
+            # 15/11 (segue31): "O teu pedido está pendente — algumas contas preferem rever manualmente os
+            # seguidores" logo depois do toque = o IG segurou ESSE follow (sinal de limite). Fecha a janela
+            # (senão ela fica por cima de todo perfil seguinte) e conta como não colou: 4 seguidos param.
+            _fechar_ok(d)
         txt2, _bb = _texto_botao_follow(xml2)
-        if txt2.startswith("seguir"):
+        if pendente or txt2.startswith("seguir"):
             nao_colou += 1
-            _log(log, f"  ~ {u}: NÃO colou ({nao_colou}) — IG desfez o follow")
+            _log(log, f"  ~ {u}: NÃO colou ({nao_colou}) — "
+                      + ("o IG segurou o follow (pedido pendente)" if pendente else "IG desfez o follow"))
             if nao_colou >= 4:
                 _log(log, "  !! SOFT-BLOCK: IG desfazendo os follows — parando (conta no limite)")
                 return _fim(False, "softblock")
@@ -1065,7 +1219,9 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
         while True:
             lote = fn.tirar_do_pool(fu, est, LOTE)
             if len(lote) < LOTE:
-                colhidos = colher_posts(d, log, cfg["chat"], parar)
+                recentes = {k for k, v in fu["posts"].items()
+                            if time.time() - float((v or {}).get("ts") or 0) < 14 * 86400}
+                colhidos = colher_posts(d, log, cfg["chat"], parar, ja_colhidos=recentes)
                 if colhidos:
                     for chave, nomes in colhidos:
                         n = fn.adicionar_ao_pool(fu, est, nomes, f"chat:{chave}")
@@ -1086,6 +1242,9 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
             yield lote
 
     restantes = []
+    abertos = 0
+    falhas_seg = 0
+    _limpar_ig(d, log, "começo da conta: IG com a memória limpa")
     try:
         # a métrica de conversão (seguidores novos do brechó) é lida pela instância do brechó, no agente
         # (_ler_seguidores_pelo_brecho) e depois de cada story do brechó — não aqui (13/11)
@@ -1102,6 +1261,7 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
             if st_lista != "ok":
                 _log(log, f"  (a lista de seguidores do brechó não abriu nesta conta: {st_lista or 'falhou'} — "
                           f"confiro pela lista \"a seguir\" de cada um)")
+            reconf = 0                           # privadas reconferidas neste lote (vão pro log técnico)
             for u in lote:
                 _chk(parar)
                 if res["perfis"] >= meta:
@@ -1122,6 +1282,9 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
                     salvar(est)
                     _log(log, f"  * @{u} JÁ SEGUE o brechó — conversão de @{conta}")
                     continue
+                abertos += 1
+                if abertos % REABRIR_IG_CADA == 0:
+                    _limpar_ig(d, log, f"{abertos} perfis abertos: limpa a memória do IG")
                 t0 = time.time()                     # tempo por etapa vai pro log (12/11, rapidez)
                 try:
                     r = abrir_perfil(d, u, log)
@@ -1130,6 +1293,21 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
                 except Exception as e:
                     r = f"erro:{str(e)[:60]}"
                 t_abrir = time.time() - t0
+                if r.startswith("bloqueio"):
+                    res["motivo"] = r
+                    _log(log, f"!! @{conta}: bloqueio de ação do IG ({r.split(':', 1)[-1]}) — paro esta conta")
+                    raise _Bloqueio()
+                if r == "falha" or r.startswith("erro"):
+                    # não grava como visitado (a pessoa continua na fila); 5 seguidas = tem algo na frente
+                    falhas_seg += 1
+                    res["pulados"] += 1
+                    _tec(log, f"  - @{u}: {r}")
+                    if falhas_seg >= 5:
+                        res["motivo"] = "falhas_seguidas"
+                        _log(log, f"!! @{conta}: 5 perfis seguidos não abriram — paro esta conta")
+                        raise _Bloqueio()
+                    continue
+                falhas_seg = 0
                 if r != "ok":
                     res["pulados"] += 1
                     ant = est["curtidos"].get(conta, {}).get(u)
@@ -1139,8 +1317,13 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
                     if r == "privado" and origem:
                         res["pend_follow"] += 1
                     _funil(u, origem, "pend_follow" if r == "privado" else "descartado")
-                    _log(log, f"  - @{u}: {r}" + (" (vai pro follow do funil)" if r == "privado" and origem
-                                                    else f" (reconferência {n_priv})" if n_priv > 1 else ""))
+                    if r == "privado" and n_priv > 1 and not origem:
+                        # 13/11 ("o log tem que ficar mais limpo"): reconferência de privada vai pro técnico; o app
+                        # vê só o resumo do lote
+                        reconf += 1
+                        _tec(log, f"  - @{u}: privado (reconferência {n_priv})")
+                    else:
+                        _log(log, f"  - @{u}: {r}" + (" (vai pro follow do funil)" if r == "privado" and origem else ""))
                     continue
                 if segue is None:                    # 2º caminho: a lista "a seguir" da pessoa
                     try:
@@ -1182,6 +1365,8 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
                 t_st = time.time() - t0
                 t0 = time.time()
                 _fechar_foto_ampliada(d)             # nada por cima do perfil antes do destaque
+                if st and not _perfil_aberto(d, u):  # o viewer do story pode ter saído pra outro lugar
+                    abrir_perfil(d, u, log)
                 try:
                     de = abrir_destaque(d, cfg["max_destaque"], log, parar) if cfg["destaque"] else None
                 except Parado:
@@ -1239,13 +1424,16 @@ def processar(d, log, conta, params=None, parar=None, rotulo=""):
                 if origem:
                     res["frios"] += 1
                 _funil(u, origem, "curtido")
+                curto = _grade_motivo.split(" (")[0] if (not c and _grade_motivo) else ""
                 _log(log, f"  + @{u}: {c} curtida(s), {st} story(s)"
                           + (f", 1 destaque ({de} curtida(s))" if de is not None else "")
-                          + (f" [{_grade_motivo}]" if not c and _grade_motivo else "")
-                          + f"  (t: abrir {t_abrir:.1f} story {t_st:.1f} destaque {t_de:.1f} "
-                            f"fotos {t_fo:.1f} checagem {t_bl:.1f}s)")
+                          + (f" [{curto}]" if curto else ""))
+                _tec(log, f"    @{u} t: abrir {t_abrir:.1f} story {t_st:.1f} destaque {t_de:.1f} fotos {t_fo:.1f} "
+                          f"checagem {t_bl:.1f}s" + (f" | {_grade_motivo}" if not c and _grade_motivo else ""))
                 _log(log, f"[progress] {res['perfis']} {meta} {rot}@{u}")
                 _sleep(*cfg["pausa"])
+            if reconf:
+                _log(log, f"  ({reconf} privado(s) reconferido(s): continuam privados)")
             if res["perfis"] >= meta:
                 break
         if res["perfis"] >= meta:

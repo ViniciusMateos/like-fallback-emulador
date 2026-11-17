@@ -8,7 +8,8 @@
         "curtido" há 1+ dia e não segue o brechó → segue
         (quem não for seguido em 7 dias sai da fila de follow — o like já foi o toque)
     privada que aceitou o follow e em 1 dia não seguiu o brechó → o Like Fallback curte (fila própria
-    da conta, reconfere todo dia até 7 dias depois do follow)
+    da conta, reconfere ~1x por dia, no máximo 2 vezes, até 7 dias depois do follow — 15/11: da 3ª
+    reconferência em diante ninguém mais aceitava)
 
 Estado em funil.json (raiz do device, fora do git):
     pool    {user: {"origem": "chat:<chave do post>", "ts": colhido}}  curtidores ainda não tocados
