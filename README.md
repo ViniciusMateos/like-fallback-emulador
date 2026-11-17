@@ -23,8 +23,9 @@ tinham seguido 8.085 pessoas e 205 delas (2,5%) seguiam o brechó.
 - Que ainda não recebeu o like fallback daquela conta.
 - **Ordem:** primeiro quem foi seguido até `dias_max` dias atrás (padrão 7), do mais recente pro mais
   antigo, porque pra essas pessoas o follow ainda tá fresco. Depois vem o acumulado antigo.
-- Privada que a conta seguiu volta pra fila 1x por dia, até 7 dias depois do follow: se aceitou e não
-  seguiu o brechó, a conta curte.
+- Privada que a conta seguiu volta pra fila ~1x por dia, **no máximo 2 vezes**, até 7 dias depois do
+  follow: se aceitou e não seguiu o brechó, a conta curte. (Medido em 2.388 reconferências: quem aceita,
+  aceita na 1ª ou na 2ª; reabrir todo dia por 7 dias só gastava perfil aberto e chegava perto do limite.)
 
 ## Funil: o like primeiro, o follow depois
 
@@ -36,10 +37,13 @@ Acabou a fila própria (ou ela está vazia), a conta não para (`frio`, ligado p
 3. Visita como sempre (confere o brechó em lote, curte stories, destaque e fotos):
    - pública curtida → etapa `curtido`;
    - privada → etapa `pend_follow` (não dá pra curtir; vai pro follow).
-4. O **Auto Follow no modo funil** (campo `funil` do modo) segue, com a MESMA conta que tocou: as
-   privadas `pend_follow` e quem foi curtido há 1+ dia e não seguiu o brechó. Só quem foi tocado nos
-   últimos 7 dias, a mais recente primeiro — o like rende muito mais gente do que os 125 follows por
-   dia, e quem não for seguido em 7 dias sai da fila (o like já foi o toque).
+4. Todo **Auto Follow começa pelo funil** da conta (`seguir_funil`) e segue, com a MESMA conta que
+   tocou: as privadas `pend_follow` e quem foi curtido há 1+ dia e não seguiu o brechó. Só quem foi
+   tocado nos últimos 7 dias, a mais recente primeiro — o like rende muito mais gente do que os 125
+   follows por dia, e quem não for seguido em 7 dias sai da fila (o like já foi o toque). Sobrando meta,
+   a conta continua pelos curtidores do chat, na mesma run; parou no funil por soft-block ou bloqueio,
+   não vai pro chat. A janela "O teu pedido está pendente" depois do Seguir conta como follow que não
+   colou (4 seguidos param a conta).
 5. Privada que aceitou o follow e em 1 dia não seguiu o brechó → o Like Fallback curte (fila própria).
 
 Estado em `funil.json` (raiz do device, fora do git): `pool`, `pessoas` (etapa, conta, origem e
@@ -55,7 +59,8 @@ está ligada) e, se a última leitura tiver mais de 20 h, no começo do Like Fal
 instância do brechó, liga, lê e desliga; ocupada com story = fica pra próxima). Se a lista parar de
 carregar antes dos conhecidos, a leitura fica marcada como incompleta e a próxima lê de novo até passar
 dela. `metricas.py` junta os toques de todos os bots — follow (`agente.log`), like (este bot) e DM
-(`dms_feitos.json`) — numa linha do tempo por pessoa:
+(`dms_feitos.json`) — numa linha do tempo por pessoa (só entra quem foi tocado depois da 1ª leitura da
+base: de quem foi tocado antes não dá pra saber quando converteu):
 
 ```
 python -m bots.like_fallback.metricas
