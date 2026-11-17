@@ -85,8 +85,11 @@ def calcular(agora=None):
     ja_seguiam, antes_base = 0, 0
     for u, tl in tl_all.items():
         t0 = tl[0][0]
-        if u in seg and seg[u] <= base_lida + 3600 and t0 <= base_lida:
-            antes_base += 1                          # estava na 1ª leitura e foi tocado antes: sem data
+        if t0 <= base_lida:
+            # 16/11: tocado ANTES da 1ª leitura sai da conta inteira — quem converteu antes dela não tem data
+            # (já estava na base) e só os que NÃO converteram ficavam: as contas antigas saíam com 0% e o
+            # "só follow" com a taxa achatada (9788 tocados → 0,15%; só os novos: 0,52%)
+            antes_base += 1
             continue
         if u in seg and seg[u] < t0:
             ja_seguiam += 1                          # já seguia antes do 1º toque (o auto-follow não filtra)
